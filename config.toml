@@ -1,0 +1,10 @@
+[wireguard]
+name = "wg0"
+device = "eth0"
+subnet = "100.65.0.0/16"
+
+[server]
+debug = true
+port = 8999
+address = "0.0.0.0"
+secret_key = "secret"
