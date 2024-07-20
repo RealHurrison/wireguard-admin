@@ -72,6 +72,11 @@ type LoginRequest struct {
 	PassWord string
 }
 
+type CreateClientRequest struct {
+	Name string
+	IP   string
+}
+
 type Response struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
@@ -200,13 +205,21 @@ func main() {
 		c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: gin.H{"token": tokenString}})
 	})
 
-	authorizedRoute := r.Use(requireAuth())
+	authorizedRoute := r.Group("/", requireAuth())
 	{
-		authorizedRoute.GET("/api/authorized", requireAuth(), func(c *gin.Context) {
+		authorizedRoute.GET("/api/authorized", func(c *gin.Context) {
 			user, _ := c.Get("user")
-			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: gin.H{"user_name": user.(User).UserName}})
+			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: gin.H{"username": user.(User).UserName}})
+		})
+
+		authorizedRoute.POST("/api/client", func(c *gin.Context) {
+
 		})
 	}
+
+	r.NoRoute(func(c *gin.Context) {
+		c.JSON(http.StatusNotFound, Response{Code: http.StatusNotFound, Message: "Not Found", Data: nil})
+	})
 
 	println("Server is running on " + fmt.Sprintf("%s:%d", CONFIG.Server.Address, CONFIG.Server.Port))
 
