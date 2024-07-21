@@ -1,9 +1,13 @@
 package main
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
+	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -15,16 +19,16 @@ import (
 	"gorm.io/gorm"
 )
 
-type Audit struct {
-	CreatedAt time.Time
-	UpdatedAt time.Time
+type Network struct {
+	IP    net.IP
+	IPNet net.IPNet
 }
 
 type Config struct {
 	Wireguard struct {
-		Name   string
-		Device string
-		Subnet string
+		Name    string
+		Device  string
+		Network Network
 	}
 
 	Server struct {
@@ -35,46 +39,53 @@ type Config struct {
 	}
 }
 
+type Audit struct {
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
 type User struct {
 	Audit
 
 	ID       string `gorm:"type:uuid;primary_key"`
-	UserName string `gorm:"unique;not null"`
-	PassWord string
+	UserName string `gorm:"unique;not null;default:null"`
+	PassWord string `gorm:"not null;default:null"`
 }
 
 type Client struct {
 	Audit
 
-	ID         string `gorm:"type:uuid;primary_key"`
-	Name       string `gorm:"unique;not null"`
-	PrivateKey string `gorm:"unique;not null"`
-	PublicKey  string `gorm:"unique;not null"`
-	IP         string `gorm:"unique;not null"`
-	DNS        string
-	Route      string
-	Rules      []Rule
+	ID         string `gorm:"type:uuid;primary_key" json:"id"`
+	Name       string `gorm:"unique;not null;default:null" json:"name"`
+	PrivateKey string `gorm:"unique;not null;default:null" json:"-"`
+	PublicKey  string `gorm:"unique;not null;default:null" json:"-"`
+	IP         string `gorm:"unique;not null;default:null" json:"ip"`
+	DNS        string `json:"dns"`
+	Route      string `json:"route"`
+	Rules      []Rule `gorm:"foreignKey:ClientID" json:"-"`
 }
 
 type Rule struct {
 	Audit
 
-	ID       string `gorm:"type:uuid;primary_key"`
-	ClientID string `gorm:"type:uuid;not null"`
-	Protocol string
-	DestIP   string
-	DestPort string
-	Action   string
+	ID       string `gorm:"type:uuid;primary_key" json:"id"`
+	ClientID string `gorm:"type:uuid;not null;index:idx_unique,unique" json:"-"`
+	Protocol string `json:"protocol"`
+	DestIP   string `json:"dest_ip"`
+	DestPort string `json:"dest_port"`
+	Action   string `json:"action"`
+	Priority int    `gorm:"not null;index:idx_unique,unique" json:"priority"`
 }
 
 type LoginRequest struct {
-	UserName string
-	PassWord string
+	UserName string `json:"username" binding:"required"`
+	PassWord string `json:"password" binding:"required"`
 }
 
 type CreateClientRequest struct {
-	Name string
-	IP   string
+	Name string `json:"name" binding:"required"`
+	IP   string `json:"ip" binding:"required"`
+	DNS  string `json:"dns"`
 }
 
 type Response struct {
@@ -85,6 +96,16 @@ type Response struct {
 
 var CONFIG *Config
 var DB *gorm.DB
+
+func (network *Network) UnmarshalText(text []byte) error {
+	ip, ipnet, err := net.ParseCIDR(string(text))
+	if err == nil {
+		network.IP = ip
+		network.IPNet = *ipnet
+	}
+
+	return err
+}
 
 func initConfig() {
 	CONFIG = &Config{}
@@ -103,7 +124,7 @@ func initDatabase() {
 		panic("failed to connect database")
 	}
 
-	DB.AutoMigrate(&User{}, &Client{})
+	DB.AutoMigrate(&User{}, &Client{}, &Rule{})
 }
 
 func requireAuth() gin.HandlerFunc {
@@ -156,9 +177,72 @@ func ComparePassword(hashedPassword, password string) bool {
 	return err == nil
 }
 
+func MustObtainLimitAndOffset(c *gin.Context, minLimit int, maxLimit int) (int, int) {
+	limit, err := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	if err != nil || limit <= 0 {
+		limit = minLimit
+	}
+
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+
+	offset, err := strconv.Atoi(c.DefaultQuery("offset", "0"))
+	if err != nil || offset < 0 {
+		offset = 0
+	}
+
+	return limit, offset
+}
+
+func CheckClientExistByID(id string) bool {
+	var count int64
+	DB.Model(&Client{}).Where("id = ?", id).Count(&count)
+	return count > 0
+}
+
+func CheckClientExistByName(name string) bool {
+	var count int64
+	DB.Model(&Client{}).Where("name = ?", name).Count(&count)
+	return count > 0
+}
+
+func CheckClientExistByIP(ip string) bool {
+	var count int64
+	DB.Model(&Client{}).Where("ip = ?", ip).Count(&count)
+	return count > 0
+}
+
+func ValidateClientIP(ipString string) (net.IP, error) {
+	ip := net.ParseIP(ipString)
+
+	if ip == nil {
+		return nil, fmt.Errorf("invalid IP address: %s", ipString)
+	}
+
+	if ip.IsLoopback() || ip.IsUnspecified() || ip.IsMulticast() {
+		return nil, fmt.Errorf("invalid IP address: %s", ipString)
+	}
+
+	if !CONFIG.Wireguard.Network.IPNet.Contains(ip) {
+		return nil, fmt.Errorf("%s not in subnet %s", ipString, CONFIG.Wireguard.Network.IPNet.String())
+	}
+
+	if CONFIG.Wireguard.Network.IP.Equal(ip) {
+		return nil, fmt.Errorf("%s is gateway", ipString)
+	}
+
+	if CheckClientExistByIP(ip.String()) {
+		return nil, fmt.Errorf("%s already exists", ipString)
+	}
+
+	return ip, nil
+}
+
 func main() {
 	initConfig()
 	initDatabase()
+
 	DB.Create(&User{ID: uuid.New().String(), UserName: "admin", PassWord: HashPassword("admin")})
 
 	if !CONFIG.Server.Debug {
@@ -213,6 +297,148 @@ func main() {
 		})
 
 		authorizedRoute.POST("/api/client", func(c *gin.Context) {
+			var request CreateClientRequest
+			if err := c.ShouldBindJSON(&request); err != nil {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Bad Request", Data: nil})
+				return
+			}
+
+			if CheckClientExistByName(request.Name) {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Duplicate client name", Data: nil})
+				return
+			}
+
+			ip, err := ValidateClientIP(request.IP)
+			if err != nil {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: err.Error(), Data: nil})
+				return
+			}
+
+			if request.DNS != "" {
+				dns := net.ParseIP(request.DNS)
+				if dns == nil {
+					c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid DNS address", Data: nil})
+					return
+				}
+				request.DNS = dns.String()
+			}
+
+			publicKey, privateKey, err := ed25519.GenerateKey(nil)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to generate key pair", Data: nil})
+				return
+			}
+
+			client := Client{
+				ID:         uuid.New().String(),
+				Name:       request.Name,
+				IP:         ip.String(),
+				DNS:        request.DNS,
+				PrivateKey: base64.StdEncoding.EncodeToString(privateKey),
+				PublicKey:  base64.StdEncoding.EncodeToString(publicKey),
+			}
+
+			if err := DB.Create(&client).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to create client", Data: nil})
+				return
+			}
+
+			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: gin.H{"id": client.ID}})
+
+		})
+
+		authorizedRoute.GET("/api/client", func(c *gin.Context) {
+			limit, offset := MustObtainLimitAndOffset(c, 10, 50)
+			var clients []Client
+			DB.Limit(limit).Offset(offset).Find(&clients)
+			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: clients})
+		})
+
+		authorizedRoute.GET("/api/client/:id", func(c *gin.Context) {
+			var client Client
+			if err := DB.First(&client, "id = ?", c.Param("id")).Error; err != nil {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid client id", Data: nil})
+				return
+			}
+
+			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: client})
+		})
+
+		authorizedRoute.PUT("/api/client/:id", func(c *gin.Context) {
+			var client Client
+			if err := DB.Omit("rules").First(&client, "id = ?", c.Param("id")).Error; err != nil {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid client id", Data: nil})
+				return
+			}
+
+			var request CreateClientRequest
+			if err := c.ShouldBindJSON(&request); err != nil {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Bad Request", Data: nil})
+				return
+			}
+
+			if request.Name != client.Name && CheckClientExistByName(request.Name) {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Duplicate client name", Data: nil})
+				return
+			}
+
+			if request.IP != client.IP {
+				ip, err := ValidateClientIP(request.IP)
+				if err != nil {
+					c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: err.Error(), Data: nil})
+					return
+				}
+				client.IP = ip.String()
+			}
+
+			if request.DNS != client.DNS && request.DNS != "" {
+				dns := net.ParseIP(request.DNS)
+				if dns == nil {
+					c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid DNS address", Data: nil})
+					return
+				}
+				request.DNS = dns.String()
+			}
+
+			client.Name = request.Name
+			client.IP = request.IP
+			client.DNS = request.DNS
+
+			if err := DB.Save(&client).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to update client", Data: nil})
+				return
+			}
+
+			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: nil})
+		})
+
+		authorizedRoute.DELETE("/api/client/:id", func(c *gin.Context) {
+			if !CheckClientExistByID(c.Param("id")) {
+				c.JSON(http.StatusBadRequest, Response{Code: http.StatusBadRequest, Message: "Invalid client id", Data: nil})
+				return
+			}
+
+			if err := DB.Delete(&Client{}, "id = ?", c.Param("id")).Error; err != nil {
+				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to delete client", Data: nil})
+				return
+			}
+
+			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: nil})
+		})
+
+		authorizedRoute.POST("/api/client/:id/rule", func(c *gin.Context) {
+
+		})
+
+		authorizedRoute.GET("/api/client/:id/rule", func(c *gin.Context) {
+
+		})
+
+		authorizedRoute.GET("/api/client/:id/rule/:rule_id", func(c *gin.Context) {
+
+		})
+
+		authorizedRoute.PUT("/api/client/:id/rule/:rule_id", func(c *gin.Context) {
 
 		})
 	}

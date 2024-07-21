@@ -1,7 +1,7 @@
 [wireguard]
 name = "wg0"
 device = "eth0"
-subnet = "100.65.0.0/16"
+network = "100.65.0.1/16"
 
 [server]
 debug = true
