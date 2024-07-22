@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
@@ -15,6 +16,7 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
+	"gopkg.in/ini.v1"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -26,16 +28,21 @@ type Network struct {
 
 type Config struct {
 	Wireguard struct {
-		Name    string
-		Device  string
-		Network Network
+		Name                string  `toml:"name"`
+		Device              string  `toml:"device"`
+		Network             Network `toml:"network"`
+		Address             string  `toml:"address"`
+		Port                uint16  `toml:"port"`
+		PersistentKeepalive uint    `toml:"persistent_keepalive"`
+		PrivateKey          string  `toml:"private_key"`
+		PublicKey           string  `toml:"public_key"`
 	}
 
 	Server struct {
-		Debug     bool
-		Port      uint16
-		Address   string
-		SecretKey string
+		Debug     bool   `toml:"debug"`
+		Port      uint16 `toml:"port"`
+		Address   string `toml:"address"`
+		SecretKey string `toml:"secret_key"`
 	}
 }
 
@@ -107,10 +114,19 @@ func (network *Network) UnmarshalText(text []byte) error {
 	return err
 }
 
+func (network *Network) String() string {
+	ipnet := net.IPNet{}
+	ipnet.IP = network.IP
+	ipnet.Mask = network.IPNet.Mask
+	return ipnet.String()
+}
+
 func initConfig() {
 	CONFIG = &Config{}
 
 	_, err := toml.DecodeFile("config.toml", CONFIG)
+
+	println(CONFIG.Server.SecretKey)
 
 	if err != nil {
 		panic("failed to load config: " + err.Error())
@@ -211,6 +227,28 @@ func CheckClientExistByIP(ip string) bool {
 	var count int64
 	DB.Model(&Client{}).Where("ip = ?", ip).Count(&count)
 	return count > 0
+}
+
+func GenerateWireguardConfig() string {
+	config := ini.Empty(ini.LoadOptions{
+		AllowNonUniqueSections: true,
+	})
+	interfaceSection, _ := config.NewSection("Interface")
+	interfaceSection.NewKey("PrivateKey", CONFIG.Wireguard.PrivateKey)
+	interfaceSection.NewKey("Address", CONFIG.Wireguard.Network.String())
+	interfaceSection.NewKey("ListenPort", fmt.Sprintf("%d", CONFIG.Wireguard.Port))
+
+	var clients []Client
+	DB.Find(&clients)
+	for _, client := range clients {
+		peerSection, _ := config.NewSection("Peer")
+		peerSection.NewKey("PublicKey", client.PublicKey)
+		peerSection.NewKey("AllowedIPs", fmt.Sprintf("%s/32", client.IP))
+	}
+
+	writer := bytes.NewBuffer(nil)
+	config.WriteTo(writer)
+	return writer.String()
 }
 
 func ValidateClientIP(ipString string) (net.IP, error) {

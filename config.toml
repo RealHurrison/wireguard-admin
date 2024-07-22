@@ -2,6 +2,11 @@
 name = "wg0"
 device = "eth0"
 network = "100.65.0.1/16"
+address = "0.0.0.0"
+port = 1194
+persistent_keepalive = 25
+private_key = "privatekey"
+public_key = "publickey"
 
 [server]
 debug = true
