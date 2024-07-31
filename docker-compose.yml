@@ -1,0 +1,11 @@
+version: "3"
+
+services:
+  wg:
+    build: .
+    container_name: wireguard-admin
+    cap_add:
+      - NET_ADMIN
+    network_mode: host
+    volumes:
+      - ./config.toml:/app/config.toml:ro

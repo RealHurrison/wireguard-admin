@@ -481,9 +481,7 @@ func main() {
 		})
 	}
 
-	r.NoRoute(func(c *gin.Context) {
-		c.JSON(http.StatusNotFound, Response{Code: http.StatusNotFound, Message: "Not Found", Data: nil})
-	})
+	r.NoRoute(gin.WrapH(http.FileServer(gin.Dir("public", false))))
 
 	println("Server is running on " + fmt.Sprintf("%s:%d", CONFIG.Server.Address, CONFIG.Server.Port))
 
