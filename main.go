@@ -9,7 +9,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
+	"os/signal"
 	"strconv"
+	"syscall"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -150,6 +153,48 @@ func initDatabase() {
 	DB.AutoMigrate(&User{}, &Client{}, &Rule{})
 }
 
+func addWireguardInterface() {
+	cmd := exec.Command("ip", "link", "add", "dev", CONFIG.Wireguard.Name, "type", "wireguard")
+	if output, err := cmd.CombinedOutput(); err != nil {
+		println(string(output))
+		panic("failed to add wireguard interface: Missing WireGuard kernel module")
+	}
+
+	cmd = exec.Command("ip", "-4", "address", "add", CONFIG.Wireguard.Network.String(), "dev", CONFIG.Wireguard.Name)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		println(string(output))
+		panic("failed to add wireguard interface: " + err.Error())
+	}
+}
+
+func delWireguardInterface() bool {
+	cmd := exec.Command("ip", "link", "del", "dev", CONFIG.Wireguard.Name)
+	if err := cmd.Run(); err != nil {
+		return false
+	}
+
+	return true
+}
+
+func syncWireguardConfig() {
+	config := GenerateWireguardConfig()
+	cmd := exec.Command("wg", "setconf", CONFIG.Wireguard.Name, "/dev/stdin")
+	cmd.Stdin = bytes.NewReader([]byte(config))
+
+	if output, err := cmd.CombinedOutput(); err != nil {
+		println(string(output))
+		panic("failed to sync wireguard config: " + err.Error())
+	}
+}
+
+func initWireguard() {
+	delWireguardInterface()
+	addWireguardInterface()
+	syncWireguardConfig()
+
+	println("Wireguard is running")
+}
+
 func requireAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		tokenString := c.GetHeader("Authorization")
@@ -242,7 +287,6 @@ func GenerateWireguardConfig() string {
 	})
 	interfaceSection, _ := config.NewSection("Interface")
 	interfaceSection.NewKey("PrivateKey", CONFIG.Wireguard.PrivateKey)
-	interfaceSection.NewKey("Address", CONFIG.Wireguard.Network.String())
 	interfaceSection.NewKey("ListenPort", fmt.Sprintf("%d", CONFIG.Wireguard.Port))
 
 	var clients []Client
@@ -284,9 +328,37 @@ func ValidateClientIP(ipString string) (net.IP, error) {
 	return ip, nil
 }
 
+func GracefulExit() {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	sig := <-sigs
+
+	println("Received signal: " + sig.String())
+	println("Shutting down...")
+
+	if !delWireguardInterface() {
+		println("Failed to delete wireguard interface")
+	}
+
+	db, err := DB.DB()
+	if err != nil {
+		panic("failed to get database connection")
+	}
+
+	if err := db.Close(); err != nil {
+		panic("failed to close database connection")
+	}
+
+	println("Server is down")
+
+	os.Exit(0)
+}
+
 func main() {
 	initConfig()
 	initDatabase()
+	initWireguard()
 
 	DB.Create(&User{ID: uuid.New().String(), UserName: "admin", PassWord: HashPassword("admin")})
 
@@ -339,6 +411,11 @@ func main() {
 		authorizedRoute.GET("/api/authorized", func(c *gin.Context) {
 			user, _ := c.Get("user")
 			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: gin.H{"username": user.(User).UserName}})
+		})
+
+		authorizedRoute.POST("/api/server/sync", func(c *gin.Context) {
+			syncWireguardConfig()
+			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: nil})
 		})
 
 		authorizedRoute.POST("/api/client", func(c *gin.Context) {
@@ -489,6 +566,8 @@ func main() {
 	}
 
 	r.NoRoute(gin.WrapH(http.FileServer(gin.Dir("public", false))))
+
+	go GracefulExit()
 
 	println("Server is running on " + fmt.Sprintf("%s:%d", CONFIG.Server.Address, CONFIG.Server.Port))
 

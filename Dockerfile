@@ -1,6 +1,14 @@
-FROM golang:1.21.3-alpine3.18 AS backend-builder-base
+FROM golang:1.21.3-alpine3.18 AS backend-builder-base-compiler
 
 RUN apk --no-cache add build-base
+
+FROM backend-builder-base-compiler AS backend-builder-base
+
+WORKDIR /build
+
+COPY go.mod go.sum ./
+
+RUN go mod download
 
 FROM backend-builder-base AS backend-builder
 
@@ -10,8 +18,7 @@ COPY . .
 
 ENV CGO_ENABLED=1 GOARCH=amd64 GOOS=linux
 
-RUN go mod download &&\
-    go build -ldflags "-w -s" -a -o wireguard-admin .
+RUN go build -o wireguard-admin .
 
 FROM node:20.12.2-alpine3.18 as frontend-builder
 
