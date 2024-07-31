@@ -1,14 +1,17 @@
-FROM golang:1.21.3-alpine3.18 AS backend-builder
+FROM golang:1.21.3-alpine3.18 AS backend-builder-base
+
+RUN apk --no-cache add build-base
+
+FROM backend-builder-base AS backend-builder
 
 WORKDIR /build
 
 COPY . .
 
-ENV CGO_ENABLED=1 GOARCH=amd64 GOOS=linux GOPROXY=https://goproxy.cn,direct
+ENV CGO_ENABLED=1 GOARCH=amd64 GOOS=linux
 
-RUN apk --no-cache add build-base &&\
-    go mod download &&\
-    go build -a -o wireguard-admin .
+RUN go mod download &&\
+    go build -ldflags "-w -s" -a -o wireguard-admin .
 
 FROM node:20.12.2-alpine3.18 as frontend-builder
 
@@ -19,13 +22,16 @@ COPY ui /build
 RUN yarn &&\
     yarn build
     
-FROM alpine:3.18
+FROM alpine:3.18 as base
+
+RUN apk --no-cache add ca-certificates wireguard-tools iptables &&\
+    rm -rf /var/cache/apk/*
+
+FROM base
 
 WORKDIR /app
 
 COPY --from=backend-builder /build/wireguard-admin .
 COPY --from=frontend-builder /build/dist ./public
-
-RUN apk --no-cache add ca-certificates wireguard-tools iptables
 
 ENTRYPOINT ["./wireguard-admin"]

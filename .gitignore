@@ -9,4 +9,5 @@
 *.db
 
 bin/
+data/
 config.toml

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"strconv"
 	"time"
 
@@ -134,8 +135,14 @@ func initConfig() {
 }
 
 func initDatabase() {
-	var err error
-	DB, err = gorm.Open(sqlite.Open("data.db"), &gorm.Config{})
+	_, err := os.Stat("data")
+	if os.IsNotExist(err) {
+		if os.Mkdir("data", 0600) != nil {
+			panic("failed to create data directory")
+		}
+	}
+
+	DB, err = gorm.Open(sqlite.Open("data/data.db"), &gorm.Config{})
 	if err != nil {
 		panic("failed to connect database")
 	}
