@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
-	"strings"
 	"syscall"
 	"time"
 
@@ -19,7 +18,8 @@ import (
 	"github.com/golang-jwt/jwt/v4"
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
-	"gopkg.in/ini.v1"
+	"golang.zx2c4.com/wireguard/wgctrl"
+	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 )
@@ -29,16 +29,21 @@ type Network struct {
 	IPNet net.IPNet
 }
 
+type Key struct {
+	wgtypes.Key
+}
+
 type Config struct {
 	Wireguard struct {
-		Name                string  `toml:"name"`
-		Device              string  `toml:"device"`
-		Network             Network `toml:"network"`
-		Port                uint16  `toml:"port"`
-		MTU                 uint16  `toml:"mtu"`
-		PersistentKeepalive uint    `toml:"persistent_keepalive"`
-		PrivateKey          string  `toml:"private_key"`
-		PublicKey           string  `toml:"public_key"`
+		Name                string        `toml:"name"`
+		Device              string        `toml:"device"`
+		Network             Network       `toml:"network"`
+		Port                int           `toml:"port"`
+		MTU                 uint16        `toml:"mtu"`
+		FirewallMark        int           `toml:"firewall_mark"`
+		PersistentKeepalive time.Duration `toml:"persistent_keepalive"`
+		PrivateKey          Key           `toml:"private_key"`
+		PublicKey           Key           `toml:"public_key"`
 	}
 
 	Server struct {
@@ -65,14 +70,15 @@ type User struct {
 type Client struct {
 	Audit
 
-	ID         string `gorm:"type:uuid;primary_key" json:"id"`
-	Name       string `gorm:"unique;not null;default:null" json:"name"`
-	PrivateKey string `gorm:"unique;not null;default:null" json:"private_key"`
-	PublicKey  string `gorm:"unique;not null;default:null" json:"public_key"`
-	IP         string `gorm:"unique;not null;default:null" json:"ip"`
-	DNS        string `json:"dns"`
-	Route      string `json:"route"`
-	Rules      []Rule `gorm:"foreignKey:ClientID" json:"-"`
+	ID           string `gorm:"type:uuid;primary_key" json:"id"`
+	Name         string `gorm:"unique;not null;default:null" json:"name"`
+	PrivateKey   string `gorm:"unique;not null;default:null" json:"private_key"`
+	PublicKey    string `gorm:"unique;not null;default:null" json:"public_key"`
+	PresharedKey string `gorm:"unique;not null;default:null" json:"preshared_key"`
+	IP           string `gorm:"unique;not null;default:null" json:"ip"`
+	DNS          string `json:"dns"`
+	Route        string `json:"route"`
+	Rules        []Rule `gorm:"foreignKey:ClientID" json:"-"`
 }
 
 type Rule struct {
@@ -115,6 +121,20 @@ func (network *Network) UnmarshalText(text []byte) error {
 	}
 
 	return err
+}
+
+func (key *Key) UnmarshalText(text []byte) error {
+	bytes, err := base64.StdEncoding.DecodeString(string(text))
+	if err != nil {
+		return err
+	}
+
+	if len(bytes) != wgtypes.KeyLen {
+		return fmt.Errorf("invalid key length: %d", len(text))
+	}
+
+	copy(key.Key[:], bytes)
+	return nil
 }
 
 func (network *Network) String() string {
@@ -182,12 +202,62 @@ func delWireguardInterface() bool {
 }
 
 func syncWireguardConfig() {
-	config := GenerateWireguardConfig()
-	cmd := exec.Command("wg", "setconf", CONFIG.Wireguard.Name, "/dev/stdin")
-	cmd.Stdin = bytes.NewReader([]byte(config))
+	// config := GenerateWireguardConfig()
+	// cmd := exec.Command("wg", "setconf", CONFIG.Wireguard.Name, "/dev/stdin")
+	// cmd.Stdin = bytes.NewReader([]byte(config))
 
-	if output, err := cmd.CombinedOutput(); err != nil {
-		println(string(output))
+	// if output, err := cmd.CombinedOutput(); err != nil {
+	// 	println(string(output))
+	// 	panic("failed to sync wireguard config: " + err.Error())
+	// }
+	wgc, err := wgctrl.New()
+	if err != nil {
+		panic("failed to create wireguard client: " + err.Error())
+	}
+	defer wgc.Close()
+
+	var clients []Client
+	DB.Find(&clients)
+
+	peers := make([]wgtypes.PeerConfig, len(clients))
+	for i, client := range clients {
+		publicKey, err := wgtypes.ParseKey(client.PublicKey)
+		if err != nil {
+			panic("failed to parse public key: " + err.Error())
+		}
+
+		preSharedKey, err := wgtypes.ParseKey(client.PresharedKey)
+		if err != nil {
+			panic("failed to parse preshared key: " + err.Error())
+		}
+
+		allowedIPs := []net.IPNet{
+			{
+				IP:   net.ParseIP(client.IP),
+				Mask: net.CIDRMask(32, 32),
+			},
+		}
+
+		peers[i] = wgtypes.PeerConfig{
+			PublicKey:                   publicKey,
+			PresharedKey:                &preSharedKey,
+			Remove:                      false,
+			ReplaceAllowedIPs:           true,
+			PersistentKeepaliveInterval: &CONFIG.Wireguard.PersistentKeepalive,
+			AllowedIPs:                  allowedIPs,
+		}
+	}
+
+	config := wgtypes.Config{
+		PrivateKey:   &CONFIG.Wireguard.PrivateKey.Key,
+		ListenPort:   &CONFIG.Wireguard.Port,
+		FirewallMark: &CONFIG.Wireguard.FirewallMark,
+		ReplacePeers: true,
+		Peers:        peers,
+	}
+
+	err = wgc.ConfigureDevice(CONFIG.Wireguard.Name, config)
+	if err != nil {
 		panic("failed to sync wireguard config: " + err.Error())
 	}
 }
@@ -286,46 +356,26 @@ func CheckClientExistByIP(ip string) bool {
 	return count > 0
 }
 
-func GenerateWireguardKeyPair() (string, string, error) {
-	cmd := exec.Command("wg", "genkey")
-	privateKey, err := cmd.Output()
-	if err != nil {
-		return "", "", err
-	}
+// func GenerateWireguardConfig() string {
+// 	config := ini.Empty(ini.LoadOptions{
+// 		AllowNonUniqueSections: true,
+// 	})
+// 	interfaceSection, _ := config.NewSection("Interface")
+// 	interfaceSection.NewKey("PrivateKey", CONFIG.Wireguard.PrivateKey)
+// 	interfaceSection.NewKey("ListenPort", fmt.Sprintf("%d", CONFIG.Wireguard.Port))
 
-	cmd = exec.Command("wg", "pubkey")
-	cmd.Stdin = bytes.NewReader(privateKey)
-	publicKey, err := cmd.Output()
-	if err != nil {
-		return "", "", err
-	}
+// 	var clients []Client
+// 	DB.Find(&clients)
+// 	for _, client := range clients {
+// 		peerSection, _ := config.NewSection("Peer")
+// 		peerSection.NewKey("PublicKey", client.PublicKey)
+// 		peerSection.NewKey("AllowedIPs", fmt.Sprintf("%s/32", client.IP))
+// 	}
 
-	privateKeyStr := strings.Trim(string(privateKey), "\n")
-	publicKeyStr := strings.Trim(string(publicKey), "\n")
-
-	return publicKeyStr, privateKeyStr, nil
-}
-
-func GenerateWireguardConfig() string {
-	config := ini.Empty(ini.LoadOptions{
-		AllowNonUniqueSections: true,
-	})
-	interfaceSection, _ := config.NewSection("Interface")
-	interfaceSection.NewKey("PrivateKey", CONFIG.Wireguard.PrivateKey)
-	interfaceSection.NewKey("ListenPort", fmt.Sprintf("%d", CONFIG.Wireguard.Port))
-
-	var clients []Client
-	DB.Find(&clients)
-	for _, client := range clients {
-		peerSection, _ := config.NewSection("Peer")
-		peerSection.NewKey("PublicKey", client.PublicKey)
-		peerSection.NewKey("AllowedIPs", fmt.Sprintf("%s/32", client.IP))
-	}
-
-	writer := bytes.NewBuffer(nil)
-	config.WriteTo(writer)
-	return writer.String()
-}
+// 	writer := bytes.NewBuffer(nil)
+// 	config.WriteTo(writer)
+// 	return writer.String()
+// }
 
 func ValidateClientIP(ipString string) (net.IP, error) {
 	ip := net.ParseIP(ipString)
@@ -438,7 +488,7 @@ func main() {
 			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: gin.H{"username": user.(User).UserName}})
 		})
 
-		authorizedRoute.POST("/api/server/sync", func(c *gin.Context) {
+		authorizedRoute.POST("/api/wireguard/sync", func(c *gin.Context) {
 			syncWireguardConfig()
 			c.JSON(http.StatusOK, Response{Code: http.StatusOK, Message: "OK", Data: nil})
 		})
@@ -470,19 +520,25 @@ func main() {
 				request.DNS = dns.String()
 			}
 
-			publicKey, privateKey, err := GenerateWireguardKeyPair()
+			preSharedKey, err := wgtypes.GenerateKey()
 			if err != nil {
-				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to generate key pair", Data: nil})
+				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to generate preshared key", Data: nil})
+				return
+			}
+			privateKey, err := wgtypes.GeneratePrivateKey()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to generate private key", Data: nil})
 				return
 			}
 
 			client := Client{
-				ID:         uuid.New().String(),
-				Name:       request.Name,
-				IP:         ip.String(),
-				DNS:        request.DNS,
-				PrivateKey: privateKey,
-				PublicKey:  publicKey,
+				ID:           uuid.New().String(),
+				Name:         request.Name,
+				IP:           ip.String(),
+				DNS:          request.DNS,
+				PrivateKey:   privateKey.String(),
+				PublicKey:    privateKey.PublicKey().String(),
+				PresharedKey: preSharedKey.String(),
 			}
 
 			if err := DB.Create(&client).Error; err != nil {
