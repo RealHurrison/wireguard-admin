@@ -8,7 +8,6 @@ func Init() {
 	CONFIG = &Config{}
 
 	_, err := toml.DecodeFile("config.toml", CONFIG)
-
 	if err != nil {
 		panic("failed to load config: " + err.Error())
 	}

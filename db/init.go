@@ -2,6 +2,7 @@ package db
 
 import (
 	"os"
+
 	"wireguard-admin/model"
 
 	"gorm.io/driver/sqlite"
@@ -13,7 +14,7 @@ var DB *gorm.DB
 func Init() {
 	_, err := os.Stat("data")
 	if os.IsNotExist(err) {
-		if os.Mkdir("data", 0600) != nil {
+		if os.Mkdir("data", 0o600) != nil {
 			panic("failed to create data directory")
 		}
 	}
@@ -23,7 +24,10 @@ func Init() {
 		panic("failed to connect database")
 	}
 
-	DB.AutoMigrate(&model.User{}, &model.Client{}, &model.Rule{})
+	err = DB.AutoMigrate(&model.User{}, &model.Client{}, &model.Rule{})
+	if err != nil {
+		panic("failed to migrate database")
+	}
 
 	var count int64
 	DB.Model(&model.User{}).Count(&count)

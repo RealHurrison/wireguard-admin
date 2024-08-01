@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"time"
+
 	"wireguard-admin/config"
 	"wireguard-admin/db"
 	"wireguard-admin/middleware"
@@ -20,11 +21,13 @@ import (
 	"gorm.io/gorm"
 )
 
-var CONFIG *config.Config
-var DB *gorm.DB
-var r *gin.Engine
+var (
+	CONFIG *config.Config
+	DB     *gorm.DB
+	r      *gin.Engine
+)
 
-func MustObtainLimitAndOffset(c *gin.Context, minLimit int, maxLimit int) (int, int) {
+func MustObtainLimitAndOffset(c *gin.Context, minLimit, maxLimit int) (int, int) {
 	limit, err := strconv.Atoi(c.DefaultQuery("limit", "10"))
 	if err != nil || limit <= 0 {
 		limit = minLimit
@@ -200,7 +203,6 @@ func Init() {
 			}
 
 			c.JSON(http.StatusOK, model.Response{Code: http.StatusOK, Message: "OK", Data: gin.H{"id": client.ID}})
-
 		})
 
 		authorizedRoute.GET("/api/client", func(c *gin.Context) {
@@ -283,19 +285,15 @@ func Init() {
 		})
 
 		authorizedRoute.POST("/api/client/:id/rule", func(c *gin.Context) {
-
 		})
 
 		authorizedRoute.GET("/api/client/:id/rule", func(c *gin.Context) {
-
 		})
 
 		authorizedRoute.GET("/api/client/:id/rule/:rule_id", func(c *gin.Context) {
-
 		})
 
 		authorizedRoute.PUT("/api/client/:id/rule/:rule_id", func(c *gin.Context) {
-
 		})
 	}
 
@@ -305,5 +303,8 @@ func Init() {
 func Run() {
 	println("Server is running on " + fmt.Sprintf("%s:%d", CONFIG.Server.Address, CONFIG.Server.Port))
 
-	r.Run(fmt.Sprintf("%s:%d", CONFIG.Server.Address, CONFIG.Server.Port))
+	err := r.Run(fmt.Sprintf("%s:%d", CONFIG.Server.Address, CONFIG.Server.Port))
+	if err != nil {
+		panic("failed to start server: " + err.Error())
+	}
 }
