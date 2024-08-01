@@ -2,9 +2,7 @@ package main
 
 import (
 	"bytes"
-	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
@@ -12,6 +10,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -35,8 +34,8 @@ type Config struct {
 		Name                string  `toml:"name"`
 		Device              string  `toml:"device"`
 		Network             Network `toml:"network"`
-		Address             string  `toml:"address"`
 		Port                uint16  `toml:"port"`
+		MTU                 uint16  `toml:"mtu"`
 		PersistentKeepalive uint    `toml:"persistent_keepalive"`
 		PrivateKey          string  `toml:"private_key"`
 		PublicKey           string  `toml:"public_key"`
@@ -68,8 +67,8 @@ type Client struct {
 
 	ID         string `gorm:"type:uuid;primary_key" json:"id"`
 	Name       string `gorm:"unique;not null;default:null" json:"name"`
-	PrivateKey string `gorm:"unique;not null;default:null" json:"-"`
-	PublicKey  string `gorm:"unique;not null;default:null" json:"-"`
+	PrivateKey string `gorm:"unique;not null;default:null" json:"private_key"`
+	PublicKey  string `gorm:"unique;not null;default:null" json:"public_key"`
 	IP         string `gorm:"unique;not null;default:null" json:"ip"`
 	DNS        string `json:"dns"`
 	Route      string `json:"route"`
@@ -161,6 +160,12 @@ func addWireguardInterface() {
 	}
 
 	cmd = exec.Command("ip", "-4", "address", "add", CONFIG.Wireguard.Network.String(), "dev", CONFIG.Wireguard.Name)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		println(string(output))
+		panic("failed to add wireguard interface: " + err.Error())
+	}
+
+	cmd = exec.Command("ip", "link", "set", "mtu", strconv.FormatUint(uint64(CONFIG.Wireguard.MTU), 10), "up", "dev", CONFIG.Wireguard.Name)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		println(string(output))
 		panic("failed to add wireguard interface: " + err.Error())
@@ -279,6 +284,26 @@ func CheckClientExistByIP(ip string) bool {
 	var count int64
 	DB.Model(&Client{}).Where("ip = ?", ip).Count(&count)
 	return count > 0
+}
+
+func GenerateWireguardKeyPair() (string, string, error) {
+	cmd := exec.Command("wg", "genkey")
+	privateKey, err := cmd.Output()
+	if err != nil {
+		return "", "", err
+	}
+
+	cmd = exec.Command("wg", "pubkey")
+	cmd.Stdin = bytes.NewReader(privateKey)
+	publicKey, err := cmd.Output()
+	if err != nil {
+		return "", "", err
+	}
+
+	privateKeyStr := strings.Trim(string(privateKey), "\n")
+	publicKeyStr := strings.Trim(string(publicKey), "\n")
+
+	return publicKeyStr, privateKeyStr, nil
 }
 
 func GenerateWireguardConfig() string {
@@ -445,7 +470,7 @@ func main() {
 				request.DNS = dns.String()
 			}
 
-			publicKey, privateKey, err := ed25519.GenerateKey(nil)
+			publicKey, privateKey, err := GenerateWireguardKeyPair()
 			if err != nil {
 				c.JSON(http.StatusInternalServerError, Response{Code: http.StatusInternalServerError, Message: "Failed to generate key pair", Data: nil})
 				return
@@ -456,8 +481,8 @@ func main() {
 				Name:       request.Name,
 				IP:         ip.String(),
 				DNS:        request.DNS,
-				PrivateKey: base64.StdEncoding.EncodeToString(privateKey),
-				PublicKey:  base64.StdEncoding.EncodeToString(publicKey),
+				PrivateKey: privateKey,
+				PublicKey:  publicKey,
 			}
 
 			if err := DB.Create(&client).Error; err != nil {
