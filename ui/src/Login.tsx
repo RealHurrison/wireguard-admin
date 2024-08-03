@@ -3,11 +3,13 @@ import { Input } from "antd";
 import React from "react";
 import wireguardLogo from './assets/wireguard.svg'
 import style from './Login.module.scss'
+import Api from './api'
 
 const Login = () => {
     const { notification } = App.useApp()
     const usernameRef = React.useRef<InputRef>(null);
     const passwordRef = React.useRef<InputRef>(null);
+    const api = new Api(null)
 
     return (
         <Flex justify="center" align="center" style={{ height: '100vh', width: '100vw' }}>
@@ -17,9 +19,16 @@ const Login = () => {
                 <Space direction="vertical" align="center" size="small">
                     <Input ref={usernameRef} placeholder="Username" className={style.input} />
                     <Input.Password ref={passwordRef} placeholder="Password" className={style.input} />
-                    <Button type="primary" onClick={() => {
-                        notification.info({ message: `Username: ${usernameRef.current!.input!.value} Password: ${passwordRef.current!.input!.value}`, duration: 1, showProgress: true, pauseOnHover: true })
-                        notification.success({ message: 'Login successful!', duration: 1, showProgress: true, pauseOnHover: true })
+                    <Button type="primary" onClick={ async () => {
+                        const username = usernameRef.current!.input!.value
+                        const password = passwordRef.current!.input!.value
+                        
+                        try {
+                            await api.login(username, password)
+                            notification.success({ message: 'Login Successful'})
+                        } catch (error) {
+                            notification.error({ message: error as string })
+                        }
                     }}>Login</Button>
                 </Space>
             </Flex>

@@ -1,4 +1,4 @@
-import { App as AppWrapper, ConfigProvider, theme } from 'antd';
+import { App as AppWrapper, ConfigProvider } from 'antd';
 import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App.tsx'
